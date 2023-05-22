@@ -4,6 +4,7 @@
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/uaccess.h>
+#include <asm/page.h>
 
 #define PROCFS_MAX_SIZE 1024
 #define PROCFS_NAME "mmaneg"
@@ -11,6 +12,19 @@
 static struct proc_dir_entry *mmaneg_entry;
 static char procfs_buffer[PROCFS_MAX_SIZE];
 static unsigned long procfs_buffer_size = 0;
+
+
+
+enum CommandType {
+    none,
+    listvma,
+    findpage,
+    writeval
+};
+
+int command;
+unsigned long address;
+
 
 // Function to handle the "listvma" command
 static void listvma_command(struct seq_file *m)
@@ -25,13 +39,19 @@ static void listvma_command(struct seq_file *m)
     }
 }
 
+
+
+
 // Function to handle the "findpage" command
 static void findpage_command(struct seq_file *m, unsigned long addr)
 {
     struct task_struct *task = current;
     struct mm_struct *mm = task->mm;
     struct vm_area_struct *vma;
+
+	spinlock_t *ptl;
     pte_t *pte;
+
     unsigned long phys_addr = 0;
 
     // Find the VMA containing the address
@@ -42,21 +62,21 @@ static void findpage_command(struct seq_file *m, unsigned long addr)
     }
 
     // Find the physical address translation
-    pte = virt_to_pte(vma->vm_mm, addr);
+    pte = get_locked_pte(mm, addr, &ptl);
     if (!pte) {
         seq_printf(m, "Translation not found for address 0x%lx\n", addr);
         return;
     }
 
     phys_addr = pte_pfn(*pte) << PAGE_SHIFT;
+    pte_unmap_unlock(pte, ptl);
     seq_printf(m, "Virtual address: 0x%lx, Physical address: 0x%lx\n", addr, phys_addr);
 }
 
 // Function to handle the "writeval" command
-static void writeval_command(struct seq_file *m, unsigned long addr, unsigned long val)
+static void writeval_command(unsigned long addr, unsigned long val)
 {
-    struct task_struct *task = current;
-    struct mm_struct *mm = task->mm;
+    // struct task_struct *task = current;
     unsigned long *ptr;
 
     // Verify the address is within the user space range
@@ -65,24 +85,18 @@ static void writeval_command(struct seq_file *m, unsigned long addr, unsigned lo
         if (access_ok((void __user *)addr, sizeof(unsigned long))) {
             // Write the new value
             if (put_user(val, ptr)) {
-                seq_printf(m, "Failed to write value to address 0x%lx\n", addr);
+                printk("Failed to write value to address 0x%lx\n", addr);
                 return;
             }
 
-            seq_printf(m, "Value written successfully to address 0x%lx\n", addr);
+            printk("Value written successfully to address 0x%lx\n", addr);
             return;
         }
     }
 
-    seq_printf(m, "Invalid address 0x%lx\n", addr);
+    printk("Invalid address 0x%lx\n", addr);
 }
 
-// Read handler for /proc/mmaneg
-static int mmaneg_proc_show(struct seq_file *m, void *v)
-{
-    seq_printf(m, "%s", procfs_buffer);
-    return 0;
-}
 
 // Write handler for /proc/mmaneg
 static ssize_t mmaneg_proc_write(struct file *file, const char __user *buffer,
@@ -102,39 +116,92 @@ static ssize_t mmaneg_proc_write(struct file *file, const char __user *buffer,
 
     // Handle the commands
     command_length = strlen(procfs_buffer);
+    command = none;
     if (strncmp(procfs_buffer, "listvma", command_length) == 0) {
-        listvma_command(file->private_data);
+        // listvma_command(file->private_data);
+        command = listvma;
     } else if (strncmp(procfs_buffer, "findpage", command_length) == 0) {
-        unsigned long addr;
-        sscanf(procfs_buffer, "findpage %lx", &addr);
-        findpage_command(file->private_data, addr);
+        sscanf(procfs_buffer, "findpage %lx", &address);
+        // findpage_command(file->private_data, addr);
+        command = findpage;
     } else if (strncmp(procfs_buffer, "writeval", command_length) == 0) {
         unsigned long addr, val;
         sscanf(procfs_buffer, "writeval %lx %lx", &addr, &val);
-        writeval_command(file->private_data, addr, val);
+        writeval_command(addr, val);
     } else {
-        seq_printf(file->private_data, "Unknown command: %s\n", procfs_buffer);
+        printk("Unknown command: %s\n", procfs_buffer);
     }
-
-    *pos = 0; // Reset file position to start
 
     return count;
 }
 
+
+static void *my_seq_start(struct seq_file *s, loff_t *pos) 
+{ 
+    static int finished = 1;
+    /* beginning a new sequence? */ 
+    if (*pos == 0) { 
+        /* yes => return a non null value to begin the sequence */ 
+        return &finished; 
+    } 
+ 
+    /* no => it is the end of the sequence, return end to stop reading */ 
+    *pos = 0; 
+    return NULL; 
+} 
+ 
+
+static void *my_seq_next(struct seq_file *s, void *v, loff_t *pos) 
+{  
+    (*pos)++; 
+    return NULL; 
+} 
+ 
+/* This function is called at the end of a sequence. */ 
+static void my_seq_stop(struct seq_file *s, void *v) 
+{ 
+    /* nothing to do, we use a static value in start() */ 
+} 
+ 
+/* This function is called for each "step" of a sequence. */ 
+static int my_seq_show(struct seq_file *s, void *v) 
+{ 
+    if (command == findpage) {
+        findpage_command(s, address);
+    } else if (command == listvma) {
+        listvma_command(s);
+    }
+    return 0; 
+} 
+ 
+/* This structure gather "function" to manage the sequence */ 
+static struct seq_operations my_seq_ops = { 
+    .start = my_seq_start, 
+    .next = my_seq_next, 
+    .stop = my_seq_stop, 
+    .show = my_seq_show, 
+}; 
+ 
+/* This function is called when the /proc file is open. */ 
+static int my_open(struct inode *inode, struct file *file) 
+{ 
+    return seq_open(file, &my_seq_ops); 
+}; 
+
 // File operations for /proc/mmaneg
-static const struct file_operations mmaneg_proc_fops = {
-    .owner = THIS_MODULE,
-    .open = seq_open,
-    .read = seq_read,
-    .write = mmaneg_proc_write,
-    .llseek = seq_lseek,
-    .release = seq_release,
+static const struct proc_ops mmaneg_proc_fops = {
+    .proc_open = my_open,
+    .proc_read = seq_read,
+    .proc_write = mmaneg_proc_write,
+    .proc_lseek = seq_lseek,
+    .proc_release = seq_release,
 };
 
 // Module initialization function
 static int __init mmaneg_init(void)
 {
-    mmaneg_entry = proc_create(PROCFS_NAME, 0, NULL, &mmaneg_proc_fops);
+    command = none;
+    mmaneg_entry = proc_create(PROCFS_NAME, 0644, NULL, &mmaneg_proc_fops);
     if (!mmaneg_entry)
         return -ENOMEM;
 
