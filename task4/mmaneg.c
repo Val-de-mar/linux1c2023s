@@ -45,32 +45,40 @@ static void listvma_command(struct seq_file *m)
 // Function to handle the "findpage" command
 static void findpage_command(struct seq_file *m, unsigned long addr)
 {
-    struct task_struct *task = current;
-    struct mm_struct *mm = task->mm;
-    struct vm_area_struct *vma;
+    struct page* pg;
 
-	spinlock_t *ptl;
-    pte_t *pte;
-
-    unsigned long phys_addr = 0;
-
-    // Find the VMA containing the address
-    vma = find_vma(mm, addr);
-    if (!vma) {
-        seq_printf(m, "Address 0x%lx is not within any VMA\n", addr);
-        return;
-    }
-
-    // Find the physical address translation
-    pte = get_locked_pte(mm, addr, &ptl);
-    if (!pte) {
+    int pg_num = get_user_pages_fast(addr, 1, 0, &pg);
+    
+    if (pg_num != 1) {
         seq_printf(m, "Translation not found for address 0x%lx\n", addr);
         return;
     }
 
-    phys_addr = pte_pfn(*pte) << PAGE_SHIFT;
-    pte_unmap_unlock(pte, ptl);
-    seq_printf(m, "Virtual address: 0x%lx, Physical address: 0x%lx\n", addr, phys_addr);
+
+
+    
+	// spinlock_t *ptl;
+    // pte_t *pte;
+
+    // unsigned long phys_addr = 0;
+
+    // // Find the VMA containing the address
+    // vma = find_vma(mm, addr);
+    // if (!vma) {
+    //     seq_printf(m, "Address 0x%lx is not within any VMA\n", addr);
+    //     return;
+    // }
+
+    // // Find the physical address translation
+    // pte = get_locked_pte(mm, addr, &ptl);
+    // if (!pte) {
+    //     seq_printf(m, "Translation not found for address 0x%lx\n", addr);
+    //     return;
+    // }
+
+    // phys_addr = pte_pfn(*pte) << PAGE_SHIFT;
+    // pte_unmap_unlock(pte, ptl);
+    // seq_printf(m, "Virtual address: 0x%lx, Physical address: 0x%lx\n", addr, phys_addr);
 }
 
 // Function to handle the "writeval" command
