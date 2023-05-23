@@ -5,6 +5,7 @@
 #include <linux/sched.h>
 #include <linux/uaccess.h>
 #include <asm/page.h>
+#include <asm-generic/io.h>
 
 #define PROCFS_MAX_SIZE 1024
 #define PROCFS_NAME "mmaneg"
@@ -16,10 +17,10 @@ static unsigned long procfs_buffer_size = 0;
 
 
 enum CommandType {
-    none,
-    listvma,
-    findpage,
-    writeval
+    none = 0,
+    listvma = 1,
+    findpage = 2,
+    writeval = 3
 };
 
 int command;
@@ -29,12 +30,14 @@ unsigned long address;
 // Function to handle the "listvma" command
 static void listvma_command(struct seq_file *m)
 {
-    struct vm_area_struct *vma;
-    struct task_struct *task = current;
+    VMA_ITERATOR(vmi, current->mm, 0);
+    struct vm_area_struct *vma = NULL;
 
     // Traverse the VMAs of the current process
-    seq_printf(m, "VMA list for PID %d:\n", task->pid);
-    for (vma = task->mm->mmap; vma; vma = vma->vm_next) {
+    seq_printf(m, "VMA list for PID %d:\n", current->pid);
+
+    
+    for_each_vma(vmi, vma) {
         seq_printf(m, "Start: 0x%lx, End: 0x%lx\n", vma->vm_start, vma->vm_end);
     }
 }
@@ -45,40 +48,7 @@ static void listvma_command(struct seq_file *m)
 // Function to handle the "findpage" command
 static void findpage_command(struct seq_file *m, unsigned long addr)
 {
-    struct page* pg;
-
-    int pg_num = get_user_pages_fast(addr, 1, 0, &pg);
-    
-    if (pg_num != 1) {
-        seq_printf(m, "Translation not found for address 0x%lx\n", addr);
-        return;
-    }
-
-
-
-    
-	// spinlock_t *ptl;
-    // pte_t *pte;
-
-    // unsigned long phys_addr = 0;
-
-    // // Find the VMA containing the address
-    // vma = find_vma(mm, addr);
-    // if (!vma) {
-    //     seq_printf(m, "Address 0x%lx is not within any VMA\n", addr);
-    //     return;
-    // }
-
-    // // Find the physical address translation
-    // pte = get_locked_pte(mm, addr, &ptl);
-    // if (!pte) {
-    //     seq_printf(m, "Translation not found for address 0x%lx\n", addr);
-    //     return;
-    // }
-
-    // phys_addr = pte_pfn(*pte) << PAGE_SHIFT;
-    // pte_unmap_unlock(pte, ptl);
-    // seq_printf(m, "Virtual address: 0x%lx, Physical address: 0x%lx\n", addr, phys_addr);
+    seq_printf(m, "Virtual address: 0x%lx, page: 0x%lx\n", addr, virt_to_phys((void*)addr));
 }
 
 // Function to handle the "writeval" command
@@ -111,6 +81,7 @@ static ssize_t mmaneg_proc_write(struct file *file, const char __user *buffer,
                                  size_t count, loff_t *pos)
 {
     int command_length;
+    char* place;
 
     if (count >= PROCFS_MAX_SIZE)
         count = PROCFS_MAX_SIZE - 1;
@@ -125,19 +96,38 @@ static ssize_t mmaneg_proc_write(struct file *file, const char __user *buffer,
     // Handle the commands
     command_length = strlen(procfs_buffer);
     command = none;
+
+    
     if (strncmp(procfs_buffer, "listvma", command_length) == 0) {
         // listvma_command(file->private_data);
         command = listvma;
-    } else if (strncmp(procfs_buffer, "findpage", command_length) == 0) {
-        sscanf(procfs_buffer, "findpage %lx", &address);
-        // findpage_command(file->private_data, addr);
-        command = findpage;
-    } else if (strncmp(procfs_buffer, "writeval", command_length) == 0) {
-        unsigned long addr, val;
-        sscanf(procfs_buffer, "writeval %lx %lx", &addr, &val);
-        writeval_command(addr, val);
-    } else {
+        return count;
+    }
+
+    place = strchr(procfs_buffer, ' ');
+    if (place == NULL) {
         printk("Unknown command: %s\n", procfs_buffer);
+        return -EFAULT;
+    }
+    *place = '\0';
+    ++place;
+    if (strncmp(procfs_buffer, "findpage", command_length) == 0) {
+        sscanf(place, "%lx", &address);
+        command = findpage;
+
+        return count;
+    }
+    
+    if (strncmp(procfs_buffer, "writeval", command_length) == 0) {
+        unsigned long addr, val;
+        sscanf(place, "%lx %lx", &addr, &val);
+        writeval_command(addr, val);
+        command = none;
+    } else {
+        --place;
+        *place = ' ';
+        printk("Unknown command: %s\n", procfs_buffer);
+        return -EFAULT;
     }
 
     return count;
@@ -147,14 +137,11 @@ static ssize_t mmaneg_proc_write(struct file *file, const char __user *buffer,
 static void *my_seq_start(struct seq_file *s, loff_t *pos) 
 { 
     static int finished = 1;
-    /* beginning a new sequence? */ 
-    if (*pos == 0) { 
-        /* yes => return a non null value to begin the sequence */ 
+    
+    if (command != none) {
         return &finished; 
     } 
  
-    /* no => it is the end of the sequence, return end to stop reading */ 
-    *pos = 0; 
     return NULL; 
 } 
  
@@ -168,17 +155,19 @@ static void *my_seq_next(struct seq_file *s, void *v, loff_t *pos)
 /* This function is called at the end of a sequence. */ 
 static void my_seq_stop(struct seq_file *s, void *v) 
 { 
-    /* nothing to do, we use a static value in start() */ 
+    
 } 
  
 /* This function is called for each "step" of a sequence. */ 
 static int my_seq_show(struct seq_file *s, void *v) 
 { 
+
     if (command == findpage) {
         findpage_command(s, address);
     } else if (command == listvma) {
         listvma_command(s);
     }
+    command = none;
     return 0; 
 } 
  
