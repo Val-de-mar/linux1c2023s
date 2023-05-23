@@ -15,6 +15,8 @@
 
 #include "my_deque.h"
 
+struct my_deque glob;
+
 
 static int device_open(struct inode *, struct file *); 
 static int device_release(struct inode *, struct file *); 
@@ -33,8 +35,6 @@ enum {
     CDEV_EXCLUSIVE_OPEN = 1, 
 }; 
  
-/* Is device open? Used to prevent multiple access to device */ 
-static atomic_t already_open = ATOMIC_INIT(CDEV_NOT_USED); 
  
  
 static struct class *cls; 
@@ -81,9 +81,6 @@ static int device_open(struct inode *inode, struct file *file)
 { 
     static int counter = 0; 
  
-    if (atomic_cmpxchg(&already_open, CDEV_NOT_USED, CDEV_EXCLUSIVE_OPEN)) 
-        return -EBUSY; 
- 
     try_module_get(THIS_MODULE); 
  
     return SUCCESS; 
@@ -92,60 +89,25 @@ static int device_open(struct inode *inode, struct file *file)
 /* Called when a process closes the device file. */ 
 static int device_release(struct inode *inode, struct file *file) 
 { 
-    /* We're now ready for our next caller */ 
-    atomic_set(&already_open, CDEV_NOT_USED); 
- 
-    /* Decrement the usage count, or else once you opened the file, you will 
-     * never get rid of the module. 
-     */ 
     module_put(THIS_MODULE); 
  
     return SUCCESS; 
 } 
  
-/* Called when a process, which already opened the dev file, attempts to 
- * read from it. 
- */ 
-static ssize_t device_read(struct file *filp, /* see include/linux/fs.h   */ 
-                           char __user *buffer, /* buffer to fill with data */ 
-                           size_t length, /* length of the buffer     */ 
+
+static ssize_t device_read(struct file *filp, 
+                           char __user *buffer, 
+                           size_t length,  
                            loff_t *offset) 
 { 
-    /* Number of bytes actually written to the buffer */ 
-    int bytes_read = 0; 
-    const char *msg_ptr = msg; 
- 
-    if (!*(msg_ptr + *offset)) { /* we are at the end of message */ 
-        *offset = 0; /* reset the offset */ 
-        return 0; /* signify end of file */ 
-    } 
- 
-    msg_ptr += *offset; 
- 
-    /* Actually put the data into the buffer */ 
-    while (length && *msg_ptr) { 
-        /* The buffer is in the user data segment, not the kernel 
-         * segment so "*" assignment won't work.  We have to use 
-         * put_user which copies data from the kernel data segment to 
-         * the user data segment. 
-         */ 
-        put_user(*(msg_ptr++), buffer++); 
-        length--; 
-        bytes_read++; 
-    } 
- 
-    *offset += bytes_read; 
- 
-    /* Most read functions return the number of bytes put into the buffer. */ 
-    return bytes_read; 
+    return pop_front(&glob, buffer, length); 
 } 
  
 /* Called when a process writes to dev file: echo "hi" > /dev/hello */ 
 static ssize_t device_write(struct file *filp, const char __user *buff, 
                             size_t len, loff_t *off) 
 { 
-    pr_alert("Sorry, this operation is not supported.\n"); 
-    return -EINVAL; 
+    return push_back(&glob, buffer, len);
 } 
  
 module_init(custom_fifo_init); 
