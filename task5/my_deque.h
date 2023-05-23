@@ -24,7 +24,7 @@ struct my_deque_node
 
 void init_my_node(struct my_deque_node* node) {
     node->begin = 0;
-    node->end =0;
+    node->end = 0;
     node->next = NULL;
 }
 
@@ -47,7 +47,8 @@ void deque_init(struct my_deque* dqe) {
 
 s64 try_write_small(struct my_deque* dqe, const void __user * data, u64 len) {
     struct my_deque_node* tail;
-    bool res;
+    s64 res;
+    printk("trying to write small %llu", len);
 
     if (len > MY_BLOCK_SZ)
     {
@@ -65,12 +66,16 @@ s64 try_write_small(struct my_deque* dqe, const void __user * data, u64 len) {
         return 0;
     }
 
-    if (MY_BLOCK_SZ <= tail->end + len) {
-        if(copy_from_user(tail->data + tail->end, data, len)) {
+    // printk("Bloc_sz %d, end %d, len %d", (int)(MY_BLOCK_SZ), (int)(tail->end), (int)(len));
+    if (MY_BLOCK_SZ >= tail->end + len) {
+        if(copy_from_user(tail->data + tail->end, data, len) != 0) {
+            spin_unlock(&(dqe->lock));
+            printk("oh ho");
             return -EFAULT;
         }
         tail->end += len;
         res = len;
+        // printk("Bloc_sz %d, end %d, len %d");
     } else {
         res = 0;
     }
@@ -89,13 +94,20 @@ void push_node_span(struct my_deque *dq, struct my_deque_node* head, struct my_d
 s64 push_long(struct my_deque *dq, const void __user *data, u64 len) {
     struct my_deque_node* head = NULL, *tail=NULL, *new_node;
     u64 delta;
+    s64 ans = len;
+    int rr;
+    // printk("inside pl, ");
 
     while(len != 0) {
         new_node = kmalloc(sizeof(struct my_deque_node), GFP_KERNEL);
         init_my_node(new_node);
         
         delta = (len > MY_BLOCK_SZ ? MY_BLOCK_SZ : len);
-        if(copy_from_user(new_node->data, data, delta)) {
+        rr = copy_from_user(new_node->data, data, delta);
+        new_node->end = delta;
+        printk("rr =  %d, delta = %d", (int)rr, (int)delta);
+
+        if(rr != 0) {
             return -EFAULT;
         }
         data += delta;
@@ -110,14 +122,16 @@ s64 push_long(struct my_deque *dq, const void __user *data, u64 len) {
     }
     
     push_node_span(dq, head, tail);
-    return len;
+
+    return ans;
 }
 
 
 
 s64 push_back(struct my_deque *dq, const void __user *data, u64 len)
 {
-    s64 res;
+    s64 res, ans;
+    // printk("inside pb");
     if (! access_ok(data, len)){
         return(-EACCES);
     }
@@ -125,11 +139,18 @@ s64 push_back(struct my_deque *dq, const void __user *data, u64 len)
     if(len == 0) {
         return 0;
     }
+
+    // printk("inside tws");
     res = try_write_small(dq, data, len);
+
+    printk("res = %d", (int)res);
     if(res != 0) {
         return res;
     }
-    return push_long(dq, data, len);   
+    ans = push_long(dq, data, len);
+
+    printk("pushed long = %d", (int)ans);
+    return ans;
 }
 
 
@@ -138,19 +159,24 @@ s64 pop_front(struct my_deque *dq, void __user *data, u64 len) {
     
     u8 end_buf_loc[1024];
     u8* end_buf = end_buf_loc;
-    struct my_deque_node* head = NULL, *finish = NULL, *old;
-    u64 delta = 0, part = 0, full = 0;
+    bool is_allocated = (len > 1024);
 
+    struct my_deque_node* head = NULL, *finish = NULL, *old;
+    u64 part = 0;
+    u64 unacquired_tail = 0;
+    s64 full = 0;
+    printk("full1 %lld", full);
 
     if (! access_ok(data, len)){
+        printk("exit 1");
         return(-EACCES);
     }
 
 
-    if (len > 1024) {
+    if (is_allocated) {
         end_buf = kmalloc(MY_BLOCK_SZ, GFP_KERNEL);
     } 
-
+    printk("full2 %lld", full);
     
     spin_lock(&(dq->lock));
         head = dq->head;
@@ -159,23 +185,24 @@ s64 pop_front(struct my_deque *dq, void __user *data, u64 len) {
             dq->head = dq->head->next;
         }
         finish = dq->head;
-        delta = dq->head->end - dq->head->begin;
-        delta = (len > delta ? delta : len);
-        if (delta != 0) {
-            memcpy(end_buf, dq->head->data + dq->head->begin, delta);
-            dq->head->begin += delta;
+        unacquired_tail = dq->head->end - dq->head->begin;
+        unacquired_tail = (len > unacquired_tail ? unacquired_tail : len);
+        if (unacquired_tail != 0) {
+            memcpy(end_buf, dq->head->data + dq->head->begin, unacquired_tail);
+            dq->head->begin += unacquired_tail;
         }
     spin_unlock(&(dq->lock));
-
+    printk("full3 %lld", full);
     for (; head != finish; )
     {
+        printk("inside!!!");
         part = head->end - head->begin;
         if (part != 0){
-            
-            if(copy_to_user(data, dq->head->data + dq->head->begin, part)){
-                if (len > 1024) {
+            if(copy_to_user(data, head->data + head->begin, part) != 0){
+                if (is_allocated) {
                     kfree(end_buf);
                 }
+                printk("exit 2");
                 return(-EFAULT);
             }
         }
@@ -184,17 +211,20 @@ s64 pop_front(struct my_deque *dq, void __user *data, u64 len) {
 
         old = head;
         head = head->next;
-        kfree(old);
+        // kfree(old);
     }
-    if (delta != 0) {
-        
-        if(copy_to_user(data, end_buf, delta)) {
-            if (len > 1024) {
+    printk("full %lld", full);
+    if (unacquired_tail != 0) {
+        printk("Unracq");
+        if(copy_to_user(data, end_buf, unacquired_tail) != 0) {
+            if (is_allocated) {
                 kfree(end_buf);
             }
+            printk("exit 3");
             return(-EFAULT);
         }
-        full += delta;
+        full += unacquired_tail;
     }
+    printk("exit 4 %lld", full);
     return full;
 }

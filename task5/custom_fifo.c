@@ -98,13 +98,23 @@ static ssize_t device_read(struct file *filp,
                            size_t length,  
                            loff_t *offset) 
 { 
-    return pop_front(&glob, buffer, length); 
+    s64 ans;
+    printk("lenlim = %lu", length);
+    ans = pop_front(&glob, buffer, length); 
+    printk("ans = %lld", ans);
+    if(ans == 0) {
+        return -EAGAIN;
+    } else {
+        return ans;
+    }
+    
 } 
  
 /* Called when a process writes to dev file: echo "hi" > /dev/hello */ 
 static ssize_t device_write(struct file *filp, const char __user *buff, 
                             size_t len, loff_t *off) 
 { 
+    printk("lenpr = %lu", len);
     return push_back(&glob, buff, len);
 } 
  
