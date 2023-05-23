@@ -9,7 +9,6 @@
 #include <linux/printk.h> 
 #include <linux/types.h> 
 #include <linux/uaccess.h> 
-#include <linux/page.h>
  
 #include <asm/errno.h> 
 
@@ -48,6 +47,7 @@ static struct file_operations chardev_fops = {
  
 static int __init custom_fifo_init(void) 
 { 
+    deque_init(&glob);
     major = register_chrdev(0, DEVICE_NAME, &chardev_fops); 
  
     if (major < 0) { 
@@ -79,8 +79,6 @@ static void __exit custom_fifo_exit(void)
 
 static int device_open(struct inode *inode, struct file *file) 
 { 
-    static int counter = 0; 
- 
     try_module_get(THIS_MODULE); 
  
     return SUCCESS; 
@@ -107,7 +105,7 @@ static ssize_t device_read(struct file *filp,
 static ssize_t device_write(struct file *filp, const char __user *buff, 
                             size_t len, loff_t *off) 
 { 
-    return push_back(&glob, buffer, len);
+    return push_back(&glob, buff, len);
 } 
  
 module_init(custom_fifo_init); 

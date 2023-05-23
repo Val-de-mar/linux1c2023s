@@ -8,14 +8,18 @@
 #include <linux/spinlock.h>
 #include <linux/mutex.h>
 
+#include <linux/uaccess.h> 
 
-#define MY_BLOCK_SZ
+
+#define MY_BLOCK_SZ 4096
+
 struct my_deque_node
 {
-    u8 data[MY_BLOCK_SZ];
+    
     u16 begin;
     u16 end;
     struct my_deque_node *next;
+    u8 data[MY_BLOCK_SZ];
 };
 
 void init_my_node(struct my_deque_node* node) {
@@ -35,18 +39,17 @@ struct my_deque
 void deque_init(struct my_deque* dqe) {
     spin_lock_init(&(dqe->lock));
 
-    dqe->head = kmalloc(sizeof(my_deque_node), GFP_KERNEL);
-    init_my_node(&(dqe->head));
+    dqe->head = kmalloc(sizeof(struct my_deque_node), GFP_KERNEL);
+    init_my_node(dqe->head);
     dqe->tail = dqe->head;
 
 }
 
-
-bool try_write_small(struct my_deque* dqe, const void __user * data, u64 len) {
+s64 try_write_small(struct my_deque* dqe, const void __user * data, u64 len) {
     struct my_deque_node* tail;
     bool res;
 
-    if (size > BLOCK_SIZE)
+    if (len > MY_BLOCK_SZ)
     {
         return 0;
     }
@@ -62,80 +65,100 @@ bool try_write_small(struct my_deque* dqe, const void __user * data, u64 len) {
         return 0;
     }
 
-    if (4096 <= tail->end + len) {
-        copy_from_user(tail->data + tail->end, data, len);
+    if (MY_BLOCK_SZ <= tail->end + len) {
+        if(copy_from_user(tail->data + tail->end, data, len)) {
+            return -EFAULT;
+        }
         tail->end += len;
-        res = 1;
+        res = len;
     } else {
         res = 0;
-        if(len <  MY_BLOCK_SZ/4) {
-            atomic_write(&(dqe->need_alloc), 1);
-        }
     }
     
     spin_unlock(&(dqe->lock));
     return res;
 }
 
-void push_node_span(struct deque *dq, struct my_deque_node* head, struct my_deque_node* tail) {
+void push_node_span(struct my_deque *dq, struct my_deque_node* head, struct my_deque_node* tail) {
     spin_lock(&(dq->lock));
         dq->tail->next = head;
         dq->tail = tail;
     spin_unlock(&(dq->lock));
 }
 
-void push_long(struct deque *dq, const void __user *data, u64 len) {
-    struct my_deque_node* head = NULL, tail=NULL, new_node;
+s64 push_long(struct my_deque *dq, const void __user *data, u64 len) {
+    struct my_deque_node* head = NULL, *tail=NULL, *new_node;
     u64 delta;
 
     while(len != 0) {
-        new_node = kmalloc(sizeof(my_deque_node), GFP_KERNEL);
+        new_node = kmalloc(sizeof(struct my_deque_node), GFP_KERNEL);
         init_my_node(new_node);
         
         delta = (len > MY_BLOCK_SZ ? MY_BLOCK_SZ : len);
-        copy_from_user(new_node->data, data, delta);
-        data += delta
+        if(copy_from_user(new_node->data, data, delta)) {
+            return -EFAULT;
+        }
+        data += delta;
         len -= delta;
         if(head == NULL) {
             head = new_node;
             tail = new_node;
         } else {
             tail->next = new_node;
-            tail = newstruct my_deque_node* _node;
+            tail = new_node;
         }
     }
     
     push_node_span(dq, head, tail);
+    return len;
 }
 
 
 
-u64 push_back(struct deque *dq, void *data, u64 len)
+s64 push_back(struct my_deque *dq, const void __user *data, u64 len)
 {
+    s64 res;
+    if (! access_ok(data, len)){
+        return(-EACCES);
+    }
+
     if(len == 0) {
         return 0;
     }
-    if(try_write_small(dq, data, len)) {
-        return len;
+    res = try_write_small(dq, data, len);
+    if(res != 0) {
+        return res;
     }
-    push_long(dq, data, len);
-    return len;    
+    return push_long(dq, data, len);   
 }
 
 
 
-u64 pop_front(struct deque *dq, const void __user *data, u64 len) {
-    u8 end_buf[MY_BLOCK_SZ];
-    struct my_deque_node* head = NULL, finish = NULL, old;
+s64 pop_front(struct my_deque *dq, void __user *data, u64 len) {
+    
+    u8 end_buf_loc[1024];
+    u8* end_buf = end_buf_loc;
+    struct my_deque_node* head = NULL, *finish = NULL, *old;
     u64 delta = 0, part = 0, full = 0;
 
+
+    if (! access_ok(data, len)){
+        return(-EACCES);
+    }
+
+
+    if (len > 1024) {
+        end_buf = kmalloc(MY_BLOCK_SZ, GFP_KERNEL);
+    } 
+
+    
     spin_lock(&(dq->lock));
         head = dq->head;
         while(len + dq->head->begin > dq->head->end && dq->head != dq->tail) {
             len -= dq->head->end - dq->head->begin;
             dq->head = dq->head->next;
         }
-        finish = qd->head;
+        finish = dq->head;
         delta = dq->head->end - dq->head->begin;
         delta = (len > delta ? delta : len);
         if (delta != 0) {
@@ -148,7 +171,13 @@ u64 pop_front(struct deque *dq, const void __user *data, u64 len) {
     {
         part = head->end - head->begin;
         if (part != 0){
-            copy_to_user(data, dq->head->data + dq->head->begin, part);
+            
+            if(copy_to_user(data, dq->head->data + dq->head->begin, part)){
+                if (len > 1024) {
+                    kfree(end_buf);
+                }
+                return(-EFAULT);
+            }
         }
         full += part;
         data += part;
@@ -158,7 +187,13 @@ u64 pop_front(struct deque *dq, const void __user *data, u64 len) {
         kfree(old);
     }
     if (delta != 0) {
-        copy_to_user(data, end_buf, delta);
+        
+        if(copy_to_user(data, end_buf, delta)) {
+            if (len > 1024) {
+                kfree(end_buf);
+            }
+            return(-EFAULT);
+        }
         full += delta;
     }
     return full;
